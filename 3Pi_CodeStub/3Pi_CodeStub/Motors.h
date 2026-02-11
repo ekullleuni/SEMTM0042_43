@@ -1,9 +1,9 @@
 /************************************
-,        .       .           .      , 
-|        |       |           |     '| 
-|    ,-: |-. ,-. |-. ,-. ,-. |-     | 
-|    | | | | `-. | | |-' |-' |      | 
-`--' `-` `-' `-' ' ' `-' `-' `-'    ' 
+,        .       .           .      ,
+|        |       |           |     '|
+|    ,-: |-. ,-. |-. ,-. ,-. |-     |
+|    | | | | `-. | | |-' |-' |      |
+`--' `-` `-' `-' ' ' `-' `-' `-'    '
 *************************************/
 
 // this #ifndef stops this file
@@ -12,19 +12,50 @@
 #ifndef _MOTORS_H
 #define _MOTORS_H
 
+/*
+ * MOTOR CALIBRATION DATA - Measured 28 Jan 2026
+ *
+ * Dead-band (minimum PWM for movement):
+ *   Left motor forward:   +15 PWM
+ *   Left motor backward:  -14 PWM
+ *   Right motor forward:  +13 PWM
+ *   Right motor backward: -12 PWM
+ *
+ * Direction: Verified
+ *   Positive PWM = Forward motion
+ *   Negative PWM = Backward motion
+ *
+ * Motor Bias (at PWM=50):
+ *   Robot drifts ~13° left over 280mm travel
+ *   Right motor slightly faster than left
+ *   PID control (Stage 4) will compensate for this
+ *
+ * Note: Dead-band means PWM values below these thresholds
+ * will not produce any wheel rotation due to motor friction.
+ */
+
 // Pin definitions.  By using #define we can
 // switch the number here, and everywhere the
 // text appears (i.e. L_PWM) it will be
 // replaced.
-#define L_PWM 10 // This is correct.
-#define L_DIR 10 // This is the wrong pin! 
-#define R_PWM 10 // This is the wrong pin! 
-#define R_DIR 10 // This is the wrong pin! 
+// Pin assignments verified against Pololu 3Pi+ 32U4 documentation
+// https://www.pololu.com/docs/0J83/5.9
+#define L_PWM 10  // Left motor PWM (speed control)
+#define L_DIR 16  // Left motor direction
+#define R_PWM 9   // Right motor PWM (speed control)
+#define R_DIR 15  // Right motor direction
+
+// Direction constants for motor control
+// NOTE: These may need adjustment during physical testing (Step 5)
+// If positive PWM causes backward motion, swap FWD and REV values
+#define FWD LOW   // Forward direction
+#define REV HIGH  // Reverse direction
 
 // It is a good idea to limit the maximum power
 // sent to the motors. Using #define means we
 // can set this value just once here, and it
 // can be used in many places in the code below.
+// This prevents motor damage and makes control more predictable
 #define MAX_PWM 180.0
 
 // Class to operate the motors.
@@ -43,26 +74,24 @@ class Motors_c {
     // value they should have.
     void initialise() {
 
-      // Uncomment and replace the ???? with the correct
-      // values, e.g  pinMode( <pin>, <INPUT or OUTPUT> );
-      // pinMode( ???? , ???? );
-      // pinMode( ???? , ???? );
-      // pinMode( ???? , ???? );
-      // pinMode( ???? , ???? );
+      // Configure all motor pins as outputs
+      // PWM pins control motor speed (0-255)
+      pinMode( L_PWM, OUTPUT );
+      pinMode( R_PWM, OUTPUT );
 
-      // Uncomment and replace ???? with the correct
-      // values, e.g. digitalWrite( <pin>, <HIGH or LOW> );
-      // Which pins will be either HIGH or LOW? What
-      // purpose do they serve?
-      //      digitalWrite( ????, ???? );
-      //      digitalWrite( ????, ???? );
+      // Direction pins control motor direction (HIGH/LOW)
+      pinMode( L_DIR, OUTPUT );
+      pinMode( R_DIR, OUTPUT );
 
-      // Uncomment and replace ???? with the correct
-      // values, e.g. analogWrite( <pin>, < 0 : 255 > );
-      // Which pins will take a value in range [0:255]?
-      // What purpose do they serve?
-      // analogWrite( ???? , ???? );
-      // analogWrite( ???? , ???? );
+      // Set initial direction to forward
+      // This establishes a known starting state
+      digitalWrite( L_DIR, FWD );
+      digitalWrite( R_DIR, FWD );
+
+      // Start with motors OFF for safety
+      // Robot should not move immediately on power-up
+      analogWrite( L_PWM, 0 );
+      analogWrite( R_PWM, 0 );
 
     } // End of initialise()
 
@@ -79,53 +108,63 @@ class Motors_c {
     // and "right_pwr", (pwr = power) and they are of the
     // type float. A float might be a value like 0.01, or
     // -150.6
+    //
+    // Positive values = forward motion
+    // Negative values = backward motion
     void setPWM( float left_pwr, float right_pwr ) {
 
-      // What should happen if the request for left_pwr
-      // is less than 0? Recall, how are these motors
-      // operated in terms of the pins used?
+      // LEFT MOTOR DIRECTION
+      // Set direction based on sign of power value
       if ( left_pwr < 0 ) {
-        // digitalWrite( ????, ???? );
+        // Negative power = reverse direction
+        digitalWrite( L_DIR, REV );
       } else {
-        // digitalWrite( ????, ???? );
+        // Positive power = forward direction
+        digitalWrite( L_DIR, FWD );
       }
 
-      // What should happen if the request for right_pwr
-      // is less than 0? Recall, how are these motors
-      // operated in terms of the pins used?
+      // RIGHT MOTOR DIRECTION
+      // Set direction based on sign of power value
       if ( right_pwr < 0 ) {
-        // digitalWrite( ????, ???? );
+        // Negative power = reverse direction
+        digitalWrite( R_DIR, REV );
       } else {
-        // digitalWrite( ????, ???? );
+        // Positive power = forward direction
+        digitalWrite( R_DIR, FWD );
       }
 
+      // LEFT MOTOR POWER PROCESSING
+      // Convert to absolute value (analogWrite needs positive only)
+      left_pwr = abs( left_pwr );
 
-      // analogWrite() requires a value in the range
-      // [0:255], and note this is positive only!
-      // Write some code here to take the value of
-      // left_pwr and ensure it is:
-      // - positive only
-      // - within the range 0 to 255
-      // Note, we have used the sign to determine
-      // the direction - so we don't care about the
-      // sign of the value any more.
-      
+      // Constrain to maximum safe PWM value
+      if ( left_pwr > MAX_PWM ) {
+        left_pwr = MAX_PWM;
+      }
 
-      // analogWrite() requires a value in the range
-      // [0:255], and note this is positive only!
-      // Write some code here to take the value of
-      // right_pwr and ensure it is:
-      // - positive only
-      // - within the range 0 to 255
-      // Note, we have used the sign to determine
-      // the direction - so we don't care about the
-      // sign of the value any more.
-      
+      // Ensure value is not negative after abs() operation
+      // (redundant but defensive programming)
+      if ( left_pwr < 0 ) {
+        left_pwr = 0;
+      }
 
-      // Lastly, write the requested power value to
-      // the motors as a PWM signal.
-      // Without the code above, this is likely to
-      // produce very unexpected behaviours.
+      // RIGHT MOTOR POWER PROCESSING
+      // Convert to absolute value (analogWrite needs positive only)
+      right_pwr = abs( right_pwr );
+
+      // Constrain to maximum safe PWM value
+      if ( right_pwr > MAX_PWM ) {
+        right_pwr = MAX_PWM;
+      }
+
+      // Ensure value is not negative after abs() operation
+      // (redundant but defensive programming)
+      if ( right_pwr < 0 ) {
+        right_pwr = 0;
+      }
+
+      // Write the processed power values to the motors
+      // This generates PWM signals to control motor speed
       analogWrite( L_PWM, left_pwr );
       analogWrite( R_PWM, right_pwr );
 

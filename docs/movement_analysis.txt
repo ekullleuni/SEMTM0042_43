@@ -1,0 +1,449 @@
+Layer 1: Hardware — Motors (Motors.h)
+
+  The lowest level. Motors_c::setPWM(float left_pwr, float right_pwr) (line 114) takes signed PWM values, sets direction
+  pins (L_DIR/R_DIR) based on sign, takes the absolute value, clamps to MAX_PWM (180), and writes to the PWM pins
+  (L_PWM/R_PWM) via analogWrite(). Positive = forward, negative = reverse. This is the only function that directly drives
+  the motors.
+
+  Layer 2: Feedback — Encoders (Encoders.h)
+
+  Two interrupt service routines (ISR(INT6_vect) for encoder 0, ISR(PCINT0_vect) for encoder 1) maintain global volatile
+  counters count_e0 (RIGHT wheel) and count_e1 (LEFT wheel). These fire automatically on pin state changes — no polling
+  needed. The swapped mapping (e0=right, e1=left) is a known gotcha noted throughout the code.
+
+  Layer 3: Speed Measurement (3Pi_CodeStub.ino, measureSpeeds())
+
+  measureSpeeds() (line 521) runs every 20ms in loop(). It computes:
+  speed_e0 = (count_e0 - prev_count_e0) / elapsed_time   // RIGHT wheel, counts/ms
+  speed_e1 = (count_e1 - prev_count_e1) / elapsed_time   // LEFT wheel, counts/ms
+  These speeds feed the PID controllers.
+
+  Layer 4: Closed-Loop Speed Control — PID (PID.h + updatePID())
+
+  PID_c::update(demand, measurement) (PID.h:78) implements a standard discrete PID: error = demand - measurement, with
+  proportional, integral (summed over time), and derivative terms. Returns a PWM feedback value.
+
+  updatePID() (3Pi_CodeStub.ino:572) runs every 10ms and, when use_pid_control is true, calls:
+  left_pwm_output  = left_pid.update(demand_speed_left, speed_e1);   // e1 = LEFT
+  right_pwm_output = right_pid.update(demand_speed_right, speed_e0); // e0 = RIGHT
+  motors.setPWM(left_pwm_output, right_pwm_output);
+
+  Helper functions setDemandSpeeds(left, right) (line 641), setDemandSpeed(speed) (line 651), and stopWithPID() (line 659)
+  set the demand variables that PID tracks.
+
+  Layer 5: Odometry — Kinematics (Kinematics.h)
+
+  Kinematics_c::update() (Kinematics.h:72), called every 20ms via updatePose(), computes dead-reckoning position from
+  encoder deltas:
+  - Forward translation: average of both wheel deltas × mm_per_count, projected onto global frame via cos(theta) /
+  sin(theta)
+  - Rotation: difference of wheel deltas × mm_per_count / (2 × wheel_sep)
+
+  This maintains the pose estimate (pose.x, pose.y, pose.theta) that all navigation depends on.
+
+  Layer 6: Navigation Functions (Stage 7 in .ino)
+
+  Three levels of navigation abstraction:
+
+  1. setTurn(angle) / checkTurn() (lines 835/846): Proportional controller for rotation. Computes angle_error =
+  angleDiff(target, pose.theta), sets differential wheel speeds (error × TURN_GAIN, -error × TURN_GAIN). Returns true when
+  error < TURN_THRESHOLD (0.05 rad).
+  2. setTravel(x, y) / checkTravel() (lines 897/910): Drives toward a point at TRAVEL_SPEED (0.3 counts/ms) with heading
+  corrections: heading_error × HEADING_CORRECTION_GAIN is added/subtracted from left/right speeds. Returns true when
+  distance < TRAVEL_THRESHOLD (10mm).
+  3. travelToXY(x, y) / updateTravelToXY() (lines 979/991): The high-level function. Uses a state machine (TRAVEL_ROTATING
+  → TRAVEL_MOVING → TRAVEL_COMPLETE → TRAVEL_IDLE) to first rotate to face the target, then drive to it. This is what the
+  FSM calls.
+
+  Helper math: angleDiff() (line 787) normalises angular difference to [-π,π], angleToPoint() (line 806) uses atan2,
+  distanceToPoint() (line 819) uses Euclidean distance.
+
+  Layer 7: Finite State Machine (the main loop())
+
+  The top-level behaviour in loop() (line 1035) runs three continuous updates every iteration, then executes the FSM:
+  State: STATE_TRAVEL_TO_WAYPOINT
+  Behaviour: Calls updateTravelToXY() toward current waypoint. If isOnLine() fires, transitions to STATE_REVERSING for
+    boundary safety.
+  ────────────────────────────────────────
+  State: STATE_AT_WAYPOINT
+  Behaviour: Pauses for WAYPOINT_PAUSE_MS (1s), then advances current_waypoint_idx and calls travelToXY() to the next
+    waypoint.
+  ────────────────────────────────────────
+  State: STATE_REVERSING
+  Behaviour: Drives backward at REVERSE_SPEED for REVERSE_DURATION (400ms), then transitions to STATE_TURNING.
+  ────────────────────────────────────────
+  State: STATE_TURNING
+  Behaviour: Rotates on the spot for a random duration (300–1000ms) in a random direction, then resumes travelToXY() to the
+
+    same waypoint.
+  ────────────────────────────────────────
+  State: STATE_RETURN_HOME
+  Behaviour: Triggered when the 4-minute timer expires. Calls travelToXY(0, 0) to navigate back to start.
+  ────────────────────────────────────────
+  State: STATE_STOPPED
+  Behaviour: Holds motors off via stopWithPID().
+  The waypoint circuit visits 6 predefined puck locations in order, wrapping around indefinitely until the timer expires.
+
+  Summary of the call chain
+
+  loop()
+    ├── measureSpeeds()          → speed_e0, speed_e1
+    ├── updatePID()              → motors.setPWM() via PID
+    ├── updatePose()             → pose.x, pose.y, pose.theta
+    └── FSM switch
+          └── updateTravelToXY()
+                ├── checkTurn()  → setDemandSpeeds()
+                └── checkTravel()→ setDemandSpeeds()
+                                      └── [PID reads demands next cycle]
+                                            └── motors.setPWM()
+
+  Everything is non-blocking — no delay() calls in the main loop. Each subsystem checks its own millis() timestamp to
+  decide whether to execute on a given iteration.
+
+
+  ⏺ Detailed Analysis of Layer 6 Navigation Functions                                                                        
+                                                                                                                       
+  Helper Functions: Math Primitives                                                                                        
+                                                                                                                           
+  angleDiff(target_angle, current_angle) — Line 787                                                                        
+                                                                                                                           
+  Purpose: Compute the shortest angular path between two angles, accounting for the circular nature of angles (0° = 360°). 
+                                                                                                                           
+  Problem it solves: Naive subtraction target - current fails at the wraparound boundary. For example, turning from 350° to
+   10° should yield +20° (turn left slightly), not -340° (turn right almost a full circle).
+
+  Algorithm:
+  diff = target_angle - current_angle;           // Raw difference
+  diff = atan2(sin(diff), cos(diff));            // Normalize to [-π, π]
+
+  The atan2(sin(θ), cos(θ)) trick exploits the fact that any angle, when converted to a unit vector (cos θ, sin θ) on the
+  unit circle, then back to an angle via atan2, gets normalized to the principal range [-π, π].
+
+  Output sign convention:
+  - Positive = turn left (counter-clockwise)
+  - Negative = turn right (clockwise)
+
+  Example:
+  - Current heading: 0.1 rad (6°)
+  - Target heading: 6.1 rad (350° ≈ -0.18 rad normalized)
+  - Raw diff: 6.0 rad (would suggest large left turn)
+  - atan2(sin(6.0), cos(6.0)) = -0.28 rad → turn right 0.28 rad ✓
+
+  ---
+  angleToPoint(target_x, target_y) — Line 806
+
+  Purpose: Calculate the absolute heading (in global frame) that points from the robot's current position to a target
+  coordinate.
+
+  Algorithm:
+  dx = target_x - pose.x;
+  dy = target_y - pose.y;
+  return atan2(dy, dx);
+
+  Standard 2D vector-to-angle conversion. atan2 handles all four quadrants correctly (unlike atan(dy/dx), which has a 180°
+  ambiguity and fails when dx=0).
+
+  Coordinate frame: Robot coordinate system at setup:
+  - Origin: start area center
+  - +X axis: robot's initial forward direction
+  - +Y axis: 90° left from +X (right-handed frame)
+
+  Example:
+  - Robot at (100, 50), target at (200, 150)
+  - dx=100, dy=100 → atan2(100, 100) = π/4 = 0.785 rad = 45°
+  - Robot should face northeast to reach target.
+
+  ---
+  distanceToPoint(target_x, target_y) — Line 819
+
+  Purpose: Euclidean distance from current position to target.
+
+  Algorithm:
+  dx = target_x - pose.x;
+  dy = target_y - pose.y;
+  return sqrt(dx*dx + dy*dy);
+
+  Straightforward Pythagorean theorem. Used to determine when the robot is "close enough" to consider the target reached.
+
+  ---
+  Behavior 1: Rotate-In-Place (setTurn / checkTurn)
+
+  setTurn(angle) — Line 835
+
+  Initialization function. Sets the global target angle and raises the turning flag. Does not command any motor motion
+  itself — that happens in checkTurn().
+
+  Usage pattern: Call once to initiate a turn, then call checkTurn() repeatedly in loop() until it returns true.
+
+  ---
+  checkTurn() — Line 846
+
+  Non-blocking control loop for rotation. Implements a proportional controller for orientation.
+
+  Step 1: Guard clause (line 847)
+
+  if (!turning) return true;
+  If not currently turning, immediately return "complete." Prevents doing work when not needed.
+
+  Step 2: Calculate error (line 850)
+
+  float angle_error = angleDiff(target_angle, pose.theta);
+  Uses angleDiff to get the shortest angular distance to target. Sign indicates direction:
+  - angle_error > 0 → target is to the left (counter-clockwise)
+  - angle_error < 0 → target is to the right (clockwise)
+
+  Step 3: Check completion (line 853)
+
+  if (abs(angle_error) < TURN_THRESHOLD) {  // 0.05 rad ≈ 2.9°
+      setDemandSpeeds(0.0, 0.0);
+      turning = false;
+      return true;  // Done!
+  }
+  When within 0.05 radians of target, stop motors and clear the flag. Returns true to signal completion.
+
+  Step 4: Proportional control (line 865)
+
+  float turn_speed = angle_error * TURN_GAIN;  // TURN_GAIN = 50.0
+  Proportional controller: Speed is directly proportional to error. Large errors → fast rotation, small errors → slow
+  rotation. This naturally decelerates as the robot approaches the target.
+
+  Units:
+  - angle_error is in radians
+  - TURN_GAIN = 50.0 has units (counts/ms)/rad
+  - turn_speed is in counts/ms (the demand unit for PID)
+
+  Example:
+  - Error = 0.1 rad (5.7°) → turn_speed = 0.1 × 50 = 5.0 counts/ms
+  - Error = 0.01 rad (0.57°) → turn_speed = 0.5 counts/ms (slow approach)
+
+  Step 5: Apply differential drive (line 872)
+
+  setDemandSpeeds(turn_speed, -turn_speed);
+  To rotate in place, wheels must spin in opposite directions at equal speeds:
+  - Left wheel: +turn_speed (forward if turning left)
+  - Right wheel: -turn_speed (backward if turning left)
+
+  Sign logic:
+  - If angle_error > 0 (target is left), turn_speed > 0:
+    - Left wheel forward, right wheel backward → robot rotates left ✓
+  - If angle_error < 0 (target is right), turn_speed < 0:
+    - Left wheel backward, right wheel forward → robot rotates right ✓
+
+  The PID controllers then track these demand speeds and adjust motor PWM accordingly.
+
+  Returns false while still turning, allowing the caller to know the behavior is ongoing.
+
+  ---
+  Behavior 2: Drive-To-Point (setTravel / checkTravel)
+
+  setTravel(x, y) — Line 897
+
+  Initialization function. Sets target coordinates and raises the traveling flag. Like setTurn, this is called once;
+  checkTravel does the actual control.
+
+  ---
+  checkTravel() — Line 910
+
+  Non-blocking control loop for straight-line travel. Drives toward a point while continuously correcting heading. Does not
+   pre-rotate to face the target — instead, it steers while moving (like driving a car).
+
+  Step 1: Guard clause (line 911)
+
+  if (!traveling) return true;
+  Immediate exit if not currently traveling.
+
+  Step 2: Calculate distance (line 914)
+
+  float distance = distanceToPoint(target_x, target_y);
+  How far are we from the goal?
+
+  Step 3: Check completion (line 917)
+
+  if (distance < TRAVEL_THRESHOLD) {  // 10 mm
+      setDemandSpeeds(0.0, 0.0);
+      traveling = false;
+      return true;
+  }
+  When within 10mm of target, stop and signal completion.
+
+  Step 4: Calculate desired heading (line 929)
+
+  float desired_heading = angleToPoint(target_x, target_y);
+  What direction should we be facing to drive straight to the target?
+
+  Step 5: Calculate heading error (line 932)
+
+  float heading_error = angleDiff(desired_heading, pose.theta);
+  How far off course are we? This is recalculated every loop iteration because the desired heading changes as the robot
+  moves (unless the target is directly ahead).
+
+  Example: Robot at (100, 0) heading 0° (east), target at (200, 100):
+  - desired_heading = atan2(100, 100) = 45°
+  - heading_error = 45° - 0° = +45° → need to turn left
+
+  Step 6: Base forward speed (line 935)
+
+  float forward_speed = TRAVEL_SPEED;  // 0.3 counts/ms
+  Constant forward speed. Both wheels will start at this base rate.
+
+  Step 7: Heading correction term (line 938)
+
+  float heading_correction = heading_error * HEADING_CORRECTION_GAIN;  // Gain = 0.5
+  Proportional correction based on how far off-heading we are.
+
+  Units:
+  - heading_error in radians
+  - HEADING_CORRECTION_GAIN = 0.5 (counts/ms)/rad
+  - heading_correction in counts/ms
+
+  Example:
+  - heading_error = 0.2 rad (11.5° off course)
+  - heading_correction = 0.2 × 0.5 = 0.1 counts/ms
+
+  Step 8: Differential drive steering (line 941)
+
+  float left_speed  = forward_speed + heading_correction;
+  float right_speed = forward_speed - heading_correction;
+  setDemandSpeeds(left_speed, right_speed);
+
+  This is the key to steering while moving forward:
+  - Both wheels get the base forward_speed (both drive forward)
+  - Correction is added to left, subtracted from right
+
+  Sign logic:
+  - If heading_error > 0 (need to turn left), heading_correction > 0:
+    - Left wheel speeds up, right wheel slows down → robot arcs left ✓
+  - If heading_error < 0 (need to turn right), heading_correction < 0:
+    - Left wheel slows down, right wheel speeds up → robot arcs right ✓
+
+  Example (continuing from above):
+  - forward_speed = 0.3, heading_correction = 0.1
+  - Left demand: 0.3 + 0.1 = 0.4 counts/ms
+  - Right demand: 0.3 - 0.1 = 0.2 counts/ms
+  - Left wheel spins faster → robot curves left to correct the +11.5° heading error
+
+  Behavior over time: As the robot steers left, pose.theta increases, reducing heading_error, which reduces
+  heading_correction, which causes the arc to straighten out. This creates a smooth approach trajectory rather than jagged
+  zig-zag corrections.
+
+  Returns false while still traveling.
+
+  ---
+  Behavior 3: Combined Navigation (travelToXY / updateTravelToXY)
+
+  This is the high-level interface used by the FSM. It combines rotation and travel into a two-phase maneuver.
+
+  travelToXY(x, y) — Line 979
+
+  Initialization. Sets target and transitions to TRAVEL_ROTATING state. This kicks off the state machine in
+  updateTravelToXY.
+
+  ---
+  updateTravelToXY() — Line 991
+
+  Non-blocking state machine that orchestrates the two-phase navigation. Must be called repeatedly from loop().
+
+  State Machine Diagram:
+
+  TRAVEL_IDLE ──travelToXY()──> TRAVEL_ROTATING ──checkTurn()──> TRAVEL_MOVING ──checkTravel()──> TRAVEL_COMPLETE ──>
+  TRAVEL_IDLE
+                                      ↑
+    ↓
+
+  └─────────────────────────────────────────────────────────────────────────────────────┘
+                                                              (ready for next call)
+
+  TRAVEL_IDLE (line 993)
+
+  Not navigating. Returns true immediately. This is the resting state.
+
+  TRAVEL_ROTATING (line 997-1011)
+
+  Goal: Rotate robot to face the target before driving forward.
+
+  Step 1: Calculate desired heading
+  float desired_angle = angleToPoint(target_x, target_y);
+
+  Step 2: Start turn if not already turning
+  if (!turning) {
+      setTurn(desired_angle);
+  }
+  This is a guard — only calls setTurn() once on the first loop iteration in this state.
+
+  Step 3: Update turn behavior
+  if (checkTurn()) {
+      travel_state = TRAVEL_MOVING;  // Turn done, advance to next phase
+  }
+  Calls checkTurn() every loop iteration. When it returns true, transition to moving phase.
+
+  Returns false (navigation not yet complete).
+
+  ---
+  TRAVEL_MOVING (line 1013-1024)
+
+  Goal: Drive to the target position (now facing roughly the right direction from the rotation phase).
+
+  Step 1: Start travel if not already traveling
+  if (!traveling) {
+      setTravel(target_x, target_y);
+  }
+  Another guard — only initializes once.
+
+  Step 2: Update travel behavior
+  if (checkTravel()) {
+      travel_state = TRAVEL_COMPLETE;  // Arrived!
+  }
+  Calls checkTravel() every iteration. When it returns true, transition to completion.
+
+  Returns false (still working).
+
+  ---
+  TRAVEL_COMPLETE (line 1026-1028)
+
+  Goal: Clean up and signal completion.
+
+  travel_state = TRAVEL_IDLE;
+  return true;
+  Resets state to IDLE and returns true to the caller. The caller (FSM) knows navigation is done and can proceed with next
+  action (e.g., pause at waypoint, advance to next waypoint).
+
+  ---
+  Why Two-Phase Navigation?
+
+  Why not just use checkTravel() alone?
+
+  1. Efficiency: Pre-rotating means the robot drives a nearly straight line to the target, minimizing distance traveled.
+  2. Predictability: The initial rotation phase gives a clean "point and shoot" behavior. The travel phase then only needs
+  small heading corrections.
+  3. Odometry drift mitigation: Driving straight (with small corrections) accumulates less rotational drift than constantly
+   steering in tight curves.
+
+  Trade-off: The pause between rotation and translation adds ~1 second per waypoint. For this foraging task, the time cost
+  is acceptable and the improved path efficiency compensates.
+
+  ---
+  Control Theory Summary
+  ┌─────────────────────┬─────────────────────────────────┬─────────────────────┬─────────────────────────────────────────┐
+  │      Function       │          Control Type           │    Error Signal     │                 Output                  │
+  ├─────────────────────┼─────────────────────────────────┼─────────────────────┼─────────────────────────────────────────┤
+  │ checkTurn()         │ Proportional (P-only)           │ Angular error (rad) │ Differential wheel speeds (opposite     │
+  │                     │                                 │                     │ signs)                                  │
+  ├─────────────────────┼─────────────────────────────────┼─────────────────────┼─────────────────────────────────────────┤
+  │ checkTravel()       │ Proportional (P-only) with      │ Heading error (rad) │ Differential correction added to base   │
+  │                     │ feed-forward                    │                     │ forward speed                           │
+  ├─────────────────────┼─────────────────────────────────┼─────────────────────┼─────────────────────────────────────────┤
+  │ PID layer           │ Full PID                        │ Speed error         │ Motor PWM (0-255)                       │
+  │ (underneath)        │                                 │ (counts/ms)         │                                         │
+  └─────────────────────┴─────────────────────────────────┴─────────────────────┴─────────────────────────────────────────┘
+  The navigation functions generate velocity demands (counts/ms), which the PID layer tracks by adjusting PWM outputs. This
+   is a cascaded control architecture:
+
+  High-level (travelToXY)
+      ↓ [position/angle errors]
+  Mid-level (checkTurn/checkTravel)  ← Proportional controllers
+      ↓ [velocity demands]
+  Low-level (PID)  ← PID controllers
+      ↓ [PWM commands]
+  Motors (hardware)
+
+  Each layer abstracts the complexity below it, making the top-level FSM logic clean and readable.
