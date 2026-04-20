@@ -365,17 +365,17 @@ int current_waypoint = 0;
 
 ---
 
-## STAGE 9: Magnetometer & Puck Detection
+## STAGE 9: Magnetometer & Puck Detection ✅ CODE COMPLETE
 **Goal**: Detect puck presence using magnetometer
 
 ### Tasks
-1. [ ] Initialize magnetometer from `Magnetometer.h`
-2. [ ] Read raw magnetometer values (x, y, z axes)
-3. [ ] Calculate magnitude: `sqrt(x*x + y*y + z*z)`
-4. [ ] Calibrate baseline (no puck present)
-5. [ ] Determine detection threshold (puck between whiskers)
-6. [ ] Implement `isPuckDetected()` function
-7. [ ] Add STATE_PUCK_FOUND to FSM
+1. [x] Initialize magnetometer from `Magnetometer.h`
+2. [x] Read raw magnetometer values (x, y, z axes)
+3. [x] Calculate magnitude: `sqrt(x*x + y*y + z*z)`
+4. [x] Calibrate baseline (no puck present) – rotation-based calibration in setup()
+5. [ ] Determine detection threshold (puck between whiskers) – **HUMAN TASK**
+6. [x] Implement `detectPuck()` function
+7. [ ] Add STATE_PUCK_FOUND to FSM – **Stage 10**
 
 ### Acceptance Criteria
 - [ ] Baseline magnitude stable when no puck present

@@ -58,6 +58,16 @@
 // This prevents motor damage and makes control more predictable
 #define MAX_PWM 180.0
 
+// Dead-band compensation: minimum PWM to produce movement.
+// Any non-zero command below these values just heats the motor
+// without turning the wheel.  Adding this offset linearises
+// the PID output → actual speed relationship.
+// Measured 28 Jan 2026; re-measure if motors/gears change.
+#define L_DEADBAND_FWD 13   // Left motor forward dead-band
+#define L_DEADBAND_REV 11   // Left motor reverse dead-band
+#define R_DEADBAND_FWD 9   // Right motor forward dead-band
+#define R_DEADBAND_REV 10   // Right motor reverse dead-band
+
 // Class to operate the motors.
 class Motors_c {
 
@@ -133,40 +143,35 @@ class Motors_c {
         digitalWrite( R_DIR, FWD );
       }
 
-      // LEFT MOTOR POWER PROCESSING
-      // Convert to absolute value (analogWrite needs positive only)
-      left_pwr = abs( left_pwr );
+      // POWER PROCESSING
+      // Convert to absolute values (analogWrite needs positive only)
+      // and apply dead-band compensation so small PID outputs
+      // actually produce wheel rotation.
+      float abs_left  = abs( left_pwr );
+      float abs_right = abs( right_pwr );
+
+      // Dead-band compensation: if the command is non-zero,
+      // shift it up by the dead-band offset so the motor
+      // always receives enough PWM to turn.
+      // A zero command stays zero (motors off).
+      if ( abs_left > 0 ) {
+        // Pick dead-band based on direction already set above
+        float db = ( left_pwr < 0 ) ? L_DEADBAND_REV : L_DEADBAND_FWD;
+        abs_left = abs_left + db;
+      }
+      if ( abs_right > 0 ) {
+        float db = ( right_pwr < 0 ) ? R_DEADBAND_REV : R_DEADBAND_FWD;
+        abs_right = abs_right + db;
+      }
 
       // Constrain to maximum safe PWM value
-      if ( left_pwr > MAX_PWM ) {
-        left_pwr = MAX_PWM;
-      }
-
-      // Ensure value is not negative after abs() operation
-      // (redundant but defensive programming)
-      if ( left_pwr < 0 ) {
-        left_pwr = 0;
-      }
-
-      // RIGHT MOTOR POWER PROCESSING
-      // Convert to absolute value (analogWrite needs positive only)
-      right_pwr = abs( right_pwr );
-
-      // Constrain to maximum safe PWM value
-      if ( right_pwr > MAX_PWM ) {
-        right_pwr = MAX_PWM;
-      }
-
-      // Ensure value is not negative after abs() operation
-      // (redundant but defensive programming)
-      if ( right_pwr < 0 ) {
-        right_pwr = 0;
-      }
+      if ( abs_left  > MAX_PWM ) abs_left  = MAX_PWM;
+      if ( abs_right > MAX_PWM ) abs_right = MAX_PWM;
 
       // Write the processed power values to the motors
       // This generates PWM signals to control motor speed
-      analogWrite( L_PWM, left_pwr );
-      analogWrite( R_PWM, right_pwr );
+      analogWrite( L_PWM, (int)abs_left );
+      analogWrite( R_PWM, (int)abs_right );
 
       // Done!
       return;

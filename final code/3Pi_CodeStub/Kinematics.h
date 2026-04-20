@@ -26,8 +26,8 @@ extern volatile long count_e1;
 // to calibrate these to get the best
 // performance. (see Labsheet 4)
 const float count_per_rev = 358.3;   // From documentation - correct.
-const float wheel_radius  = 16.4;    // mm, could vary - calibrate.
-const float wheel_sep     = 41.23;    // mm, from centre of robot to wheel centre 
+const float wheel_radius  = 16.5;    // mm, could vary - calibrate.
+const float wheel_sep     = 43.01;    // mm, from centre of robot to wheel centre 
                                      //     - could vary, calibrate
 
 // Take the circumference of the wheel and divide by the 
@@ -78,14 +78,23 @@ class Kinematics_c {
         float x_contribution;   // linear translation
         float th_contribution;  // rotation
 
+        // Atomic read: disable interrupts while copying volatile
+        // encoder counts to prevent ISR from corrupting a mid-read
+        // on the 8-bit AVR (4-byte long is not atomic)
+        long local_e1, local_e0;
+        noInterrupts();
+        local_e1 = count_e1;
+        local_e0 = count_e0;
+        interrupts();
+
         // How many counts since last update()?
-        delta_e1 = count_e1 - last_e1;
-        delta_e0 = count_e0 - last_e0;
+        delta_e1 = local_e1 - last_e1;
+        delta_e0 = local_e0 - last_e0;
 
         // Used last encoder values, so now update to
         // current for next iteration
-        last_e1 = count_e1;
-        last_e0 = count_e0;
+        last_e1 = local_e1;
+        last_e0 = local_e0;
         
         // Work out x contribution in local frame.
         mean_delta = (float)delta_e1;
@@ -101,12 +110,18 @@ class Kinematics_c {
         th_contribution /= (wheel_sep *2.0);
 
 
-        // Update global frame by taking these
-        // local contributions, projecting a point
-        // and adding to global pose.
-        x = x + x_contribution * cos( theta );
-        y = y + x_contribution * sin( theta );
+        // Mid-point Euler integration: use heading at the
+        // midpoint of the timestep for doubled accuracy
+        // during curved paths (essentially free vs forward Euler)
+        float theta_mid = theta + (th_contribution / 2.0);
+        x = x + x_contribution * cos( theta_mid );
+        y = y + x_contribution * sin( theta_mid );
         theta = theta + th_contribution;
+
+        // Normalize theta to [-PI, PI] to preserve float
+        // precision over long runs
+        while (theta > PI) theta -= 2.0 * PI;
+        while (theta < -PI) theta += 2.0 * PI;
 
         // Done!
     } // End of update()

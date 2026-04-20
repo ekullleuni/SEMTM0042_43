@@ -201,13 +201,74 @@
 - **Removed unused FORWARD_SPEED define** (was 0.4; no longer needed)
 - **STAGE 8 CODE COMPLETE** ✅ – requires physical testing of waypoint accuracy
 
+**Session 10 - Stage 9 CODE COMPLETE (12 Feb 2026)**
+- **Implemented Magnetometer.h** (LIS3MDL via Pololu library):
+  - Added `mag.enableDefault()` in `initialise()` – CRITICAL, sensor readings freeze without it
+  - Added calibration data storage: min/max/offset/scaling per axis
+  - Added `resetCalibration()`, `updateCalibration()`, `finalizeCalibration()` – same pattern as LineSensors_c
+  - Added `getCalibratedReadings()` – normalises each axis to [-1, +1]
+  - Added `getMagnitude()` – vector magnitude from calibrated readings (baseline ~1.0)
+  - Added `detectPuck(threshold)` – returns true when magnitude exceeds threshold
+- **Integrated into 3Pi_CodeStub.ino**:
+  - Uncommented `#include "Magnetometer.h"` and `Magnetometer_c magnetometer` instance
+  - Added magnetometer variables: `mag_read_ts`, `mag_magnitude`, `mag_ok`, `PUCK_MAGNITUDE_THRESHOLD`
+  - Added `calibrateMagnetometer()` – blocking routine in setup(), rotates 5 s collecting min/max, computes offset/scaling
+  - Added `readMagnetometer()` – non-blocking, respects 100 ms interval between I2C reads
+  - Added `detectPuck()` – wrapper comparing cached magnitude against threshold
+  - Magnetometer init + calibration wired into setup() (before pose reinit)
+  - `readMagnetometer()` added to continuous system updates in loop()
+- **Architecture notes**:
+  - `detectPuck()` is ready to be called inside `STATE_AT_WAYPOINT` in the FSM
+  - Default `PUCK_MAGNITUDE_THRESHOLD = 1.5` – MUST be calibrated physically
+  - If sensor not found on I2C, `mag_ok = false` and all reads are skipped gracefully
+- **STAGE 9 CODE COMPLETE** – Requires physical calibration of threshold ✅
+
+**Session 11 - Stages 10-11 Bug Fixes & Logic Corrections (12 Feb 2026)**
+- **Fixed stray semicolons in `#define` macros** (MAG_READ_INTERVAL, REVERSE_DISTANCE):
+  - Semicolons in `#define` become part of the macro text, causing compile errors wherever the macro is expanded (e.g. `if (x >= 10;)`)
+- **Fixed MAG_READ_INTERVAL**: Changed from 10 → 100 ms. The LIS3MDL sensor needs >= 100 ms between I2C reads or it may stop responding until power cycle.
+- **Fixed traverse waypoint calculation** (WP0):
+  - Old code used `1/m2_x` and `1/m2_y` reciprocals which blow up when components are near zero, and result wasn't offset from any base position
+  - New code: computes perpendicular to robot→puck unit vector, offsets from puck position by TRAVERSE_OFFSET. Correct geometry for bypass manoeuvre.
+- **Added 4-minute timer check to FSM**:
+  - `timer_start_ms` and `TIMER_DURATION_MS` were defined but never checked in loop()
+  - Added pre-switch check: if timer expired and not already heading home/stopped → immediately `travelToXY(0,0)` and switch to `STATE_RETURN_HOME`
+- **Removed dead enum states**:
+  - `STATE_REVERSING`, `STATE_TURNING` (no case in main FSM switch)
+  - `TRAVERSE_WP3`, `TRAVERSE_FACE_HOME` (no case in traverse switch)
+- **Fixed stale comment** on traverse_wp arrays (said "3 waypoints", actually max 2)
+- **Added post-push waypoint continuation**:
+  - After STATE_RETURN_HOME delivers a puck, robot now advances to next waypoint and continues searching (if time remains) instead of going to STATE_STOPPED
+  - Critical for Expert tier marks (return up to 7 pucks)
+- **Fixed compile errors from previous session**:
+  - `bool in_far_quadrant` local declarations → assignments (variable now persistent)
+  - `TRAVERSE_LATERAL_OFFSET` → `TRAVERSE_OFFSET`
+  - Missing `*` operators and incorrect unit vector math
+
+**Session 12 - Movement Analysis & Tuning Framework (17 Feb 2026)**
+- **Comprehensive movement analysis** across 6 logical layers:
+  - Layer 0 (Kinematics): Fixed to use mid-point Euler integration (was forward Euler), added theta normalization to [-PI,PI], added atomic encoder reads with noInterrupts()/interrupts()
+  - Layer 1 (Motors): Added dead-band compensation — non-zero PWM commands now get shifted up by measured dead-band offset, linearising the PID output → speed relationship
+  - Layer 3 (PID): Added anti-windup clamp (i_limit=250), EMA-filtered derivative (alpha=0.2), zero-demand PID reset to prevent integral carryover
+  - Layer 4 (Navigation): TURN_GAIN reduced from 100→5.0 (was causing bang-bang control), added MIN_TURN_SPEED floor, added travel deceleration (TRAVEL_DECEL_DIST=50mm)
+- **Created tuning branch sketch** (overwrote 3Pi_CodeStub.ino):
+  - 5 independent state machines selectable via `#define TUNE_LAYER` (1, 3, 0, 4, 5)
+  - Layer 1: PWM ramp 0→25 for each motor/direction, raw analogWrite bypassing dead-band compensation
+  - Layer 3: Step response at 3 speeds (0.5, 0.15, -0.3 c/ms), Serial Plotter output
+  - Layer 0: Linear test (1000 counts), rotation test (4 full CCW turns), 200mm square validation
+  - Layer 4: Turn accuracy (4 angles), travel accuracy (2 legs), square validation
+  - Layer 5: Waypoint circuit (6 WPs + home), 4-minute endurance with 30s pose reporting
+- **Created docs/Tuning_Guide.md**: Complete parameter table (all tunable values), step-by-step procedures for each layer, correction formulas, symptom-diagnosis tables, tuning checklist
+- **PID gains adjusted**: Kp 50→40, Ki 1.0→0.8 (CLAUDE.md still says 50/1 — reconcile after physical testing)
+- **IMPORTANT**: The tuning sketch should be on a separate branch. The main codebase .ino was overwritten.
+
 ---
 
 ## Current Project State
 *(Update with current architecture, known bugs, working features)*
 
 
-**Status**: ✅ Stage 8 CODE COMPLETE – waypoint circuit + boundary safety + return to start
+**Status**: ✅ Stage 10/11 CODE COMPLETE – puck traverse + return-home + resume-search logic implemented. Tuning framework created.
 
 **Working Features**:
 - ✅ Arduino IDE with correct board configured
@@ -269,6 +330,11 @@
   - After full circuit (6 waypoints) wraps back to WP1
   - 1 s pause at each waypoint (placeholder for Stage 9 puck detection)
   - Pose re-initialised AFTER calibration spin (odometry corruption fix)
+- ✅ **Stage 9 Magnetometer & Puck Detection - CODE COMPLETE**:
+  - Magnetometer.h: LIS3MDL calibration (rotation-based min/max) + magnitude-based puck detection
+  - Non-blocking readMagnetometer() in loop (100 ms interval)
+  - detectPuck() ready for FSM integration at STATE_AT_WAYPOINT
+  - PUCK_MAGNITUDE_THRESHOLD = 1.5 (default, needs physical calibration)
 
 **Known Bugs**:
 - None currently - motor bias is now compensated by PID
@@ -333,6 +399,63 @@
   - Boundary-safe travel with reverse+turn recovery
   - Odometry corruption bug fixed (pose re-init after calibration)
 
+**Session 7 - Code Optimization & Deployment Prep (19 Feb 2026)**
+- **Implemented OLED Timer Display**:
+  - Uncommented and enabled OLED display support
+  - Timer starts BEFORE magnetometer calibration (no time loss)
+  - Displays "Sec:" on row 0, countdown on row 1, updating once/second
+  - Non-blocking timeRemaining() call in loop()
+
+- **Moved Magnetometer Calibration to FSM**:
+  - New state: STATE_CALIBRATING_MAGNETOMETER (first state)
+  - Magnetometer initialization in setup(), calibration deferred to loop
+  - 3-rotation spin happens during FSM execution, not blocking setup
+  - Fresh pose reset after calibration (odometry preservation)
+  - Robot automatically transitions to waypoint search after calibration
+
+- **Memory Optimization for Deployment** (77% → reduced):
+  - Removed verbose debug Serial.print() statements:
+    - Stage initialization messages (removed 6 Serial.println calls)
+    - Waypoint arrival/heading debug output
+    - Traverse phase debug messages (4 removed)
+    - Magnetometer calibration axis printing (3 axis details removed)
+    - Estimated 500+ bytes of program storage saved
+  - Removed unnecessary display.timeRemaining() in setup()
+  - Consolidated debug code without affecting functionality
+  - Kept critical messages: magnetometer detection, calibration status
+  - Code ready for deployment on 28KB board limit
+
+- **Code Status**:
+  - Compiles without errors ✅
+  - OLED timer display functional ✅
+  - Magnetometer calibration integrated into FSM ✅
+  - Memory optimized for deployment ✅
+  - Ready for physical testing
+
+**Session 13 - Line Sensor Scientific Analysis Framework (9 Mar 2026)**
+- **Created comprehensive analysis plan** (`docs/LineSensor_Scientific_Analysis_Plan.md`):
+  - Circuit analysis of ADC mode (voltage divider with internal pull-up + phototransistor)
+  - Circuit analysis of RC timing mode (capacitor discharge, documented but not implemented)
+  - Derived sensor response model: rectangular hyperbola in reflectance
+  - Pin mapping verified against Pololu documentation
+  - Designed 4 experimental phases with detailed procedures
+  - Python visualisation specification: 8 plot types including response curves, noise distributions, SNR analysis
+  - Test map descriptions: 25 shades, gradient1 (3 strips), gradient2 (full page), thin-line
+- **Created dedicated test sketch** (`LineSensorTest/LineSensorTest.ino`):
+  - Separate sketch directory with symlinked .h files (does not modify main codebase)
+  - Three-phase FSM controlled by Button A (advance phase) and Button B (trigger action):
+    - **Phase 1 (SHADE)**: Button B captures 50 ADC readings per shade patch, all 5 sensors, transmitted as CSV
+    - **Phase 2 (GRADIENT)**: Continuous logging at 100Hz while human pushes robot along gradient strip; encoder counts provide position; Button B toggles logging on/off per strip
+    - **Phase 3 (THINLINE)**: Robot autonomously drives across thin line at 7 angles (0° to 90° in 15° steps), logging sensors + encoders at 200Hz; auto-reverse and turn between passes
+  - Serial output at 115200 baud in CSV format with comment headers for each phase
+  - **Compiles cleanly**: 63% flash (18292/28672), 21% RAM (544/2560)
+  - Button B = pin 30 (3Pi+ 32U4 Button B, shared with TX LED)
+  - No OLED display used (avoids pin conflict with Button B)
+- **Design decisions**:
+  - Gradient test uses human-push (not robot drive) because serial cable friction degrades straight-line accuracy; ATmega32U4 SRAM/EEPROM too small to store gradient data on-robot
+  - Thin-line test uses robot drive (short ~150mm passes, cable interference tolerable)
+  - All data transmitted live over serial; Python logger captures to CSV files
+
 ---
 
 ## Next Steps
@@ -351,8 +474,55 @@
    - 6 waypoints extracted and verified from Map.svg
    - Waypoint circuit with boundary-safe travel implemented
    - **Requires physical test**: confirm odometry accuracy to waypoints
-9. **CURRENT**: Stage 9: Magnetometer & Puck Detection
-   - Magnetometer.h needs implementing
-   - Physical calibration of baseline / puck threshold required
-10. **THEN**: Stage 10: Intermediate Solution (push puck out)
-11. **THEN**: Stages 11-13: Expert Solution (return puck to start)
+9. ✅ Stage 9: Magnetometer & Puck Detection - CODE COMPLETE
+   - Magnetometer.h implemented with LIS3MDL calibration + detection
+   - Integrated into setup() and loop()
+   - **Requires physical calibration**: adjust PUCK_MAGNITUDE_THRESHOLD
+10. ✅ Stage 10/11: Puck Traverse & Return Home - CODE COMPLETE
+    - detectPuck() wired into STATE_AT_WAYPOINT
+    - STATE_TRAVERSE_PUCKED_WAYPOINT: reverse → bypass → push position → face home
+    - STATE_RETURN_HOME: travelToXY(0,0), then resume search if time remains
+    - 4-minute timer enforced in FSM
+11. Physical testing & calibration (foraging)
+    - Test traverse geometry on robot (TRAVERSE_OFFSET, REVERSE_DISTANCE)
+    - Verify puck push alignment and delivery
+    - Tune PUCK_MAGNITUDE_THRESHOLD if needed
+
+---
+
+**Session 14 - Gradient Centre-Finding Test (8 Apr 2026)**
+- **New operating mode**: Complete rewrite of `3Pi_CodeStub.ino` to implement a gradient centre-finding test. The old waypoint/puck-foraging FSM has been **replaced** (recoverable from git).
+- **GradientCalibration.h** — new header file:
+  - Stores calibration data: `grad_cal_raw[25][5]` (averaged ADC per shade per sensor)
+  - Lightness % computed on-the-fly via `grad_cal_pct(i)` to save 100 bytes RAM
+  - Two interpolation modes (runtime toggle via `use_cubic_interp`):
+    - **Piecewise-linear** (default): simple segment-based lookup
+    - **Monotone cubic** (Fritsch-Carlson): smoother first-derivative-continuous curves, tangent slopes computed on-the-fly (zero extra RAM)
+  - API: `gradientToPercent(sensor_idx, raw_reading)` → lightness % [0=black, 100=white]
+  - API: `getAverageLightness(raw_readings[])` → mean across all 5 sensors
+- **Gradient calibration routine** (`calibrateGradientSensors(25)`):
+  - Robot drives across a 25-shade grey-gradient strip, recording averaged ADC readings at each shade
+  - Outputs CSV data over Serial for offline analysis in Python/Excel
+  - Also prints linear vs cubic interpolation comparison for sensor 2 (centre)
+- **New 6-state FSM** for the gradient test:
+  - `GSTATE_WAIT_START` → wait for Button A
+  - `GSTATE_SCAN_ROTATE` → full 360deg rotation, sampling sensors every 50ms, tracking best heading via composite score (centre darkness + edge symmetry)
+  - `GSTATE_TURN_TO_BEST` → align to the best heading found
+  - `GSTATE_DRIVE_GRADIENT` → edge-differential reactive steering (Method A): compare left vs right edge sensor lightness, steer toward the darker side
+  - `GSTATE_AT_CENTER` → stop, display results on OLED (X, Y, time)
+  - `GSTATE_DONE` → Button A to restart from a new position
+- **Centre detection**: all 5 sensors below `CENTER_DARKNESS_THRESHOLD` (15%) for 3 consecutive readings
+- **Safety**: 30-second timeout if centre not found
+- **Serial debug**: steering values printed at ~10 Hz during drive phase for tuning
+- **OLED display**: state-dependent content (scanning, aligning, driving, results)
+- **RAM usage**: 2367/2560 bytes (92%) — 193 bytes free for stack. Tight but functional.
+- **Flash usage**: 24034/28672 bytes (83%)
+- **Human-tunable parameters**: `GRADIENT_FORWARD_SPEED`, `GRADIENT_STEER_GAIN`, `GRADIENT_MAX_STEER`, `CENTER_DARKNESS_THRESHOLD`, `SYMMETRY_WEIGHT`
+- **Compiles cleanly** ✅
+
+12. **CURRENT**: Gradient test physical tuning
+    - Run gradient calibration on physical strip, verify CSV output is monotonic
+    - Place on radial gradient, test scan heading selection
+    - Tune GRADIENT_STEER_GAIN and CENTER_DARKNESS_THRESHOLD on physical robot
+    - Compare linear vs cubic interpolation outputs
+12. **THEN**: Line sensor boundary checks during travel (safety)

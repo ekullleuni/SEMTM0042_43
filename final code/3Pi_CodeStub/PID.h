@@ -24,6 +24,8 @@ class PID_c {
     float d_term;
     float i_sum;
     float feedback;
+    float d_term_filtered;  // EMA-filtered derivative term
+    float i_limit;          // Anti-windup: max |i_sum| value
 
     // To store gains.
     float p_gain;
@@ -54,6 +56,9 @@ class PID_c {
        i_gain = i;
        d_gain = d;
 
+       d_term_filtered = 0;
+       i_limit = 250.0;  // Default anti-windup limit for i_sum
+
        ms_last_t = millis();
     }
 
@@ -66,6 +71,7 @@ class PID_c {
       p_term = 0;
       i_term = 0;
       d_term = 0;
+      d_term_filtered = 0;
       i_sum = 0;
       last_error = 0;
       feedback = 0;
@@ -115,6 +121,11 @@ class PID_c {
       // discrete integration
       i_sum = i_sum + (error * float_dt);
 
+      // Anti-windup: clamp i_sum to prevent unbounded growth
+      // that causes overshoot after state transitions
+      if (i_sum > i_limit) i_sum = i_limit;
+      if (i_sum < -i_limit) i_sum = -i_limit;
+
       // i_term.
       i_term = i_gain * i_sum;
       
@@ -123,7 +134,10 @@ class PID_c {
       // to last_error - error.  It depends on the
       // error signal sign in relation to the system.
       diff_error = (error - last_error) / float_dt;
-      d_term = diff_error * d_gain;
+      // EMA low-pass filter on derivative to suppress encoder noise
+      // alpha=0.2 retains 80% of previous value (heavy smoothing)
+      d_term_filtered = 0.2 * (diff_error * d_gain) + 0.8 * d_term_filtered;
+      d_term = d_term_filtered;
 
       // Update 03/10/25.  Added line here, 
       // fixing minor d-term bug.
